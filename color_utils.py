@@ -141,8 +141,18 @@ def simulate_cvd(img_rgb01: np.ndarray, cvd_type: str = "deutan", severity: floa
     severity: 0.0 (no effect) to 1.0 (severe)
     """
 
+    img_rgb01 = np.asarray(img_rgb01, dtype=np.float32)
+
+    # Check if the image is a just a list of colors and not a real image
+    if img_rgb01.ndim == 2 and img_rgb01.shape[-1] == 3:
+        # Add new dimension to the list of colors to become an image
+        img_rgb01 = img_rgb01[None, :, :]
+    # Check if after add new dimension the file is in a valid format
+    if img_rgb01.ndim != 3 or img_rgb01.shape[-1] != 3:
+        raise ValueError("simulate_cvd method expect a HxWx3 array.")
+
     # sRGB -> linear
-    lin = srgb_to_linear(img_rgb01.clip(0, 1).astype(np.float32))
+    linear_colors = srgb_to_linear(img_rgb01.clip(0, 1).astype(np.float32))
 
     # Choose matrix based on CVD
     t = cvd_type.lower()
@@ -155,7 +165,7 @@ def simulate_cvd(img_rgb01: np.ndarray, cvd_type: str = "deutan", severity: floa
     else:
         raise ValueError("cvd_type should be 'protan', 'deutan' or 'tritan'.")
 
-    linear_simulation = apply_matrix(lin, blend_matrix)
+    linear_simulation = apply_matrix(linear_colors, blend_matrix)
 
     # Clamp + linear -> sRGB
     linear_simulation = np.clip(linear_simulation, 0.0, 1.0)
