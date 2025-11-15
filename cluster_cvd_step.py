@@ -99,22 +99,20 @@ def analyze_collisions(image_path: str, cluster_number: int = 6, cvd_type: str =
     ab_centers, cluster_labels = kmeans_ab(ab_samples, cluster_number=cluster_number)
 
     # 3) Build full Lab centroids
-    lab_centroids = build_lab_centroids(
-        img_lab, cluster_labels, sample_rows, sample_cols, ab_centers
-    )
+    lab_centroids = build_lab_centroids(img_lab, cluster_labels, sample_rows, sample_cols, ab_centers)
 
     # 4) Simulate CVD on centroids and compute pairwise ΔE between simulated centroids
     lab_centroids_cvd = simulate_palette_cvd(lab_centroids, cvd_type=cvd_type, severity=severity)
-    delta_matrix_cvd = pairwise_delta_lab(lab_centroids_cvd)
+    delta_cvd = pairwise_delta_lab(lab_centroids_cvd)
 
     # 5) Collisions (ΔE < threshold)
-    collisions = collision_graph(delta_matrix_cvd, threshold=threshold)
+    collisions = collision_graph(delta_cvd, threshold=threshold)
 
     # 6) Print
     print(f"Clusters: {cluster_number}, CVD: {cvd_type}, severity: {severity}, threshold: {threshold}")
     print("ΔE2000 matrix under CVD (approx.):")
     np.set_printoptions(precision=2, suppress=True)
-    print(delta_matrix_cvd)
+    print(delta_cvd)
 
     if collisions:
         print("\nCollisions detected (i, j, ΔE):")
@@ -123,4 +121,151 @@ def analyze_collisions(image_path: str, cluster_number: int = 6, cvd_type: str =
     else:
         print("\nNo collisions below the threshold.")
 
-    return lab_centroids, lab_centroids_cvd, delta_matrix_cvd, collisions
+    centroids_optimized = optimize_palette_from_collisions(
+        lab_centroids,
+        collisions,
+        cvd_type=cvd_type,
+        severity=severity,
+        step=5.0,
+        search_radius=2,
+        lambda_fidelity=0.7,
+    )
+
+    palette_cvd_lab_optimized = simulate_palette_cvd(centroids_optimized, cvd_type=cvd_type, severity=severity)
+    delta_cvd_optimized = pairwise_delta_lab(palette_cvd_lab_optimized)
+    collisions_optimized = collision_graph(delta_cvd_optimized, threshold=threshold)
+
+    print("After optimization:")
+    print("\nΔE2000 matrix under CVD:")
+    print(delta_cvd_optimized)
+
+    if collisions_optimized:
+        print("\nCollisions detected (i, j, ΔE):")
+        for i, j, d in collisions_optimized:
+            print(f"  {i} -- {j}  ΔE={d:.2f}")
+    else:
+        print("\nNo collisions below the threshold.")
+
+    return (lab_centroids, lab_centroids_cvd, delta_cvd, collisions, centroids_optimized,
+            palette_cvd_lab_optimized, delta_cvd_optimized, collisions_optimized)
+
+
+# lambda_fidelity -> Penalty weight for color change compared to the original color.
+def optimize_single_centroid(
+        cluster_index: int,
+        palette_lab: np.ndarray,
+        cvd_type: str = "deutan",
+        severity: float = 1.0,
+        step: float = 5.0,
+        search_radius: int = 2,
+        lambda_fidelity: float = 0.5) -> np.ndarray:
+    """
+    Optimizes a centroid (cluster_index) by moving only a* and b* in a grid.
+    Objective: increase separation under CVD without significantly distorting the original color.
+    Returns a new Lab centroid with shape(3,).
+    """
+    num_clusters = palette_lab.shape[0]
+    original_centroid = palette_lab[cluster_index].copy()
+
+    # In the start the best centroid is the original one
+    best_centroid = original_centroid.copy()
+
+    # less infinity for any initial score to be better
+    best_score = -np.inf
+
+    luminosity_original = float(original_centroid[0])
+    a_original, b_original = float(original_centroid[1]), float(original_centroid[2])
+
+    # Create an offset range that will be used for testing.
+    # ex step 5 and search_radius 2: [-10, -5, 0, 5, 10]
+    ab_offsets = np.arange(-search_radius, search_radius + 1, 1) * step
+
+    for delta_a in ab_offsets:
+        for delta_b in ab_offsets:
+            # Applies the offset to the grid
+            a_candidate = a_original + delta_a
+            b_candidate = b_original + delta_b
+
+            # New candidate centroid with a* and b* shifted
+            candidate_centroid = np.array([luminosity_original, a_candidate, b_candidate], dtype=np.float32)
+
+            # assemble a candidate palette
+            candidate_palette = palette_lab.copy()
+            candidate_palette[cluster_index] = candidate_centroid
+
+            palette_cvd_lab = simulate_palette_cvd(candidate_palette, cvd_type=cvd_type, severity=severity)
+
+            # Cluster color in CVD
+            # (1,3)
+            target_cvd_color = palette_cvd_lab[cluster_index][None, :]
+
+            # Pallet in CVD
+            # (k,3)
+            all_cvd_colors = palette_cvd_lab
+
+            # Calculate delta between target color and all colors in the CVD palette.
+            delta_cvd = deltaE_2000(
+                # Duplicates target_cvd_color k times to create pair (target, other colors).
+                np.repeat(target_cvd_color, num_clusters, axis=0), all_cvd_colors)
+
+            # Since the CVD delta needs to be minimal,
+            # we define the distance between clusters of the same color as infinite so that it is not taken into account.
+            delta_cvd[cluster_index] = np.inf
+            min_delta_cvd = float(np.min(delta_cvd))
+
+            # Delta between the candidate and the original color
+            delta_normal = float(deltaE_2000(candidate_centroid[None, :], original_centroid[None, :])[0])
+
+            # Objective function.
+            # min_delta_cvd -> Increase the value to find more separated colors under CVD.
+            # delta_normal -> Decrease the value of deltaE_normal to avoid altering the original color too much.
+            # lambda_fidelity -> Penalty weight for color change compared to the original color.
+            score = min_delta_cvd - lambda_fidelity * delta_normal
+
+            # Check if the candidate is better than the previous one.
+            if score > best_score:
+                best_score = score
+                best_centroid = candidate_centroid
+
+    return best_centroid
+
+
+def optimize_palette_from_collisions(
+        palette_lab: np.ndarray,
+        collision_edges,
+        cvd_type: str = "deutan",
+        severity: float = 1.0,
+        step: float = 5.0,
+        search_radius: int = 2,
+        lambda_fidelity: float = 0.5) -> np.ndarray:
+    """
+    Optimizes only the clusters that participate in collisions.
+    collision_edges: list of tuples (i, j, ΔE) from collision_graph.
+    Returns new lab palette with shape (k,3).
+    """
+
+    if not collision_edges:
+        return palette_lab.copy()
+
+    # Creates a set with all cluster indices that appear on any edge.
+    # This avoids duplicating optimizations of the same cluster.
+    indices_to_optimize = set()
+    for i, j, _ in collision_edges:
+        indices_to_optimize.add(i)
+        indices_to_optimize.add(j)
+
+    # Starting optimized centroid variable
+    optimized_centroids = palette_lab.copy()
+
+    for cluster_index in sorted(indices_to_optimize):
+        optimized_centroids[cluster_index] = optimize_single_centroid(
+            cluster_index,
+            optimized_centroids,
+            cvd_type=cvd_type,
+            severity=severity,
+            step=step,
+            search_radius=search_radius,
+            lambda_fidelity=lambda_fidelity
+        )
+
+    return optimized_centroids
