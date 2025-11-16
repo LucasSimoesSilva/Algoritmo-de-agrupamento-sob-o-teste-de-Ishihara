@@ -1,5 +1,6 @@
 from color_utils import *
 from cluster_utils import *
+from color_utils import lab_to_rgb, write_rgb
 
 
 def kmeans_ab(ab_samples: np.ndarray, cluster_number: int = 6, attempts: int = 5, criteria_eps: float = 0.5,
@@ -17,9 +18,7 @@ def kmeans_ab(ab_samples: np.ndarray, cluster_number: int = 6, attempts: int = 5
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, criteria_iter, criteria_eps)
 
     compactness, labels, cluster_centers = cv2.kmeans(
-        points, K=cluster_number, bestLabels=None, criteria=criteria,
-        attempts=attempts, flags=cv2.KMEANS_PP_CENTERS
-    )
+        points, K=cluster_number, bestLabels=None, criteria=criteria, attempts=attempts, flags=cv2.KMEANS_PP_CENTERS)
 
     # Flatten labels to a 1D vector
     labels = labels.reshape(-1)
@@ -146,6 +145,23 @@ def analyze_collisions(image_path: str, cluster_number: int = 6, cvd_type: str =
     else:
         print("\nNo collisions below the threshold.")
 
+    # 7) Apply optimized palette to original image.
+    print("\nGenerating recolored image")
+
+    label_map_full = assign_clusters_to_image(img_lab, centroids_optimized)
+
+    img_lab_recolored = recolor_image_from_clusters(
+        img_lab=img_lab,
+        label_map=label_map_full,
+        lab_centroids_original=lab_centroids,
+        lab_centroids_optimized=centroids_optimized,
+        blend_ratio=0.1)
+
+    img_rgb_recolored = lab_to_rgb(img_lab_recolored)
+    write_rgb("../images/saida_recolorida.png", img_rgb_recolored)
+
+    print("Image created")
+
     return (lab_centroids, lab_centroids_cvd, delta_cvd, collisions, centroids_optimized,
             palette_cvd_lab_optimized, delta_cvd_optimized, collisions_optimized)
 
@@ -269,3 +285,68 @@ def optimize_palette_from_collisions(
         )
 
     return optimized_centroids
+
+
+def recolor_image_from_clusters(
+        img_lab: np.ndarray,
+        label_map: np.ndarray,
+        lab_centroids_original: np.ndarray,
+        lab_centroids_optimized: np.ndarray,
+        blend_ratio: float = 0.1) -> np.ndarray:
+    """
+    Recolors the image by replacing each cluster with its optimized centroid.
+    blend_ratio: fraction of the original color blended to avoid harsh edges. (0 = optimized only; 1 = original only).
+    """
+    height, width, _ = img_lab.shape
+
+    # Starting image as a zero array
+    img_lab_recolored = np.zeros_like(img_lab, dtype=np.float32)
+
+    # Get number of clusters based on number of centroids
+    num_clusters = lab_centroids_original.shape[0]
+
+    for cluster_index in range(num_clusters):
+        # Get the pixels that are in this cluster
+        cluster_mask = (label_map == cluster_index)
+
+        # Check if cluster is really in the image
+        if np.any(cluster_mask):
+            # Calculates the final color with blend:
+            # Greater weighting on the optimized centroid (1.0 - blend_ratio);
+            # Small fraction of the original centroid to smooth transitions (blend_ratio);
+            blended_centroid = (
+                    (1.0 - blend_ratio) * lab_centroids_optimized[cluster_index] +
+                    blend_ratio * lab_centroids_original[cluster_index])
+
+            # Assigns this mixed color to all pixels belonging to this cluster.
+            img_lab_recolored[cluster_mask] = blended_centroid
+
+    return img_lab_recolored
+
+
+def assign_clusters_to_image(img_lab: np.ndarray, centroids_lab: np.ndarray) -> np.ndarray:
+    """
+    Assigns a cluster label (0..k-1) to each pixel in the image,
+    based on the distance in a*b* to the centroids.
+    Returns an array (H, W) of integer labels.
+    """
+    height, width, _ = img_lab.shape
+
+    # extracts only the a* and b* channels from the image.
+    # (N,2)
+    ab_pixels = img_lab[..., 1:3].reshape(-1, 2).astype(np.float32)
+
+    # extracts the a* and b* channels from the centroids (ignores Luminosity)
+    # (k,2)
+    ab_centroids = centroids_lab[:, 1:3].astype(np.float32)
+
+    # Calculates difference between each pixel and each centroid.
+    diff = ab_pixels[:, None, :] - ab_centroids[None, :, :]
+
+    # Euclidean distance squared between a pixel and each centroid
+    # (N,k)
+    dist_squared = np.sum(diff * diff, axis=2)
+
+    # For each pixel, it retrieves the index of the nearest centroid.
+    cluster_labels = np.argmin(dist_squared, axis=1).reshape(height, width)
+    return cluster_labels
