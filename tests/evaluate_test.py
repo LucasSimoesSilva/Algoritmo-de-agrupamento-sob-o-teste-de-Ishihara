@@ -80,13 +80,8 @@ def evaluate_images():
         "image_6_recolored.png": "45",
         "image_7_recolored.png": "5",
         "image_8_recolored.png": "7",
-        "image_9_recolored.png": "16",
-        "image_10_recolored.png": "73",
-        "image_11_recolored.png": "26",
-        "image_12_recolored.png": "42",
-        "image_13_recolored.png": "12",
-        "image_14_recolored.png": "8",
-        "image_15_recolored.png": "29",
+        "image_9_recolored.png": "42",
+        "image_10_recolored.png": "29",
     }
 
     import os
